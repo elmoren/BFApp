@@ -2,4 +2,4 @@
 
 ## Synopsis
 
-morbo BoundaryFinder
+    morbo BoundaryFinder
