@@ -1,0 +1,742 @@
+#!/usr/bin/env perl
+use strict; use warnings;
+use lib 'lib';
+
+use Mojolicious::Lite;
+use BFApp;
+use BlastManager;
+use BlastResults;
+use BoundaryFinder;
+use ConsensusSeq;
+use ConsensusSeqIO;
+use Data::Dumper;
+
+$|++;
+# Documentation browser under "/perldoc"
+plugin 'PODRenderer';
+
+app->secret("eqnviaoudfebfoi4315643iods834mf8du3j44imdj181");
+
+# Cache to store the objects too large for sessions
+my $cache = Mojo::Cache->new(max_keys => 50);
+
+get '/' => sub {
+  my $self = shift;
+  $self->render('index');
+};
+
+get '/blast' => sub {
+    my $self = shift;
+
+    #
+    # Get available databases and queries
+    #
+    my $dblist = BFApp::blastDBs;
+    my $queries = BFApp::get_files('public/blast_query');
+    
+    $self->render('blast', dblist => $dblist, qlist => $queries);
+};
+
+get '/blastresults' => sub { shift->redirect_to('/blast'); };
+post '/blastresults' => sub {
+    
+    my $self = shift;
+    
+    #
+    # Get the form values, and run the blast
+    #
+    
+    my $blast  = $self->param('blast');
+    my $db     = $self->param('db');
+    my $evalue = $self->param('evalue');
+    my $query  = $self->param('query');
+
+    # Assert user selected have params
+    foreach my $req (qw { blast db evalue query }) {
+	if ( not $self->param($req) or $self->param($req) eq "") {
+	    $self->render(text => "Missing required paramter: $req"); return;
+	}
+    }
+    
+    # Add Base Paths
+    $db    = "public/blastdb/$db";
+    $query = "public/blast_query/$query";
+    
+    my $bm = BlastManager->new(-blast_db => $db);
+    $bm->evalue(-e => $evalue);
+    my $results = $bm->tblastn(-query => $query);
+    
+    # Session Store: BlastResults Object, DB path
+    $self->session(hits => $results->{_hits});
+    $self->session(db => $db);
+
+    #
+    # Get available consensus sequences
+    #
+    my $cons_seq =  BFApp::get_files('public/consensus_seq');
+    
+    $self->render('blastresults', 
+		  cons_seq => $cons_seq,
+		  blast => $blast,
+		  db => $db,
+		  evalue => $evalue,
+		  query => $query,
+		  raw => $results->{-raw_blast},
+		  results => $results
+	);
+};
+
+get '/boundaryfinder' => sub {
+    my $self = shift;
+    my $cons_seq_list = BFApp::get_files('public/consensus_seq');
+    $self->render('boundary', 
+		  results =>[], 
+		  hits => [], 
+		  idx_list => [],
+		  sequence => "", 
+		  cons_seq => $cons_seq_list );
+};
+
+post '/boundaryfinder' => sub {
+    my $self = shift;
+
+    my @bf_results;
+    my @hits;
+    my @hit_list;
+    my @idx_list;
+    my $sequence = "";
+
+    #
+    # Boundary finder either uses blast hits or a sequence from a text area
+    #
+
+    # By sequence
+    if ( defined $self->param('sequence') ) {
+	my $cons_file = "public/consensus_seq/" . $self->param('cons_seq');
+	$sequence = $self->param('sequence') 
+	    if defined $self->param('sequence');
+
+	$sequence =~ s/\n|\r//gs;
+
+	my $seqIO = ConsensusSeqIO->new(-path => $cons_file);
+
+	my $cons5 = $seqIO->next_seq;
+	my $cons3 = $seqIO->next_seq;
+
+	# Boundary Finder on short sequence
+	my $up = BoundaryFinder::score_seq(-seq => $sequence, 
+					   -cons_seq => $cons5);
+	my $down = BoundaryFinder::score_seq(-seq => $sequence, 
+					     -cons_seq => $cons3);
+	
+	push @bf_results, { $cons5->title => $up, $cons3->title => $down };
+
+	# Clear session so it does not cause problems
+	$self->session(hits => 0);
+
+	$self->session(up_boundary => $cons3->boundary);
+	$self->session(down_boundary => $cons5->boundary - 1);
+    }
+    # By selected blast hits
+    elsif ( defined $self->param('hit') ) {
+	my $cons_file = "public/consensus_seq/" . $self->param('cons_seq');
+	@hits = $self->param('hit') if defined $self->param('hit');
+	
+	if (@hits == 0 || not $cons_file =~ m/\.cons$/) {
+	    $self->render(text => 'Error: No blast hits selected');
+	    return;
+	}
+	
+	my $seqIO = ConsensusSeqIO->new(-path => $cons_file);
+	my $cons5 = $seqIO->next_seq;
+	my $cons3 = $seqIO->next_seq;
+
+#	print Dumper($cons5);
+#	print Dumper($cons3);
+
+	# Mojo
+	my $results = $self->session('hits') ;
+	my $db = $self->session('db');
+	$self->session(up_boundary => $cons3->boundary);
+	$self->session(down_boundary => $cons5->boundary - 1);
+
+	# Run the BF
+	for (my $i = 0; $i < @hits; $i++) {
+	    my $hit = $results->[$hits[$i]];
+#	    print Dumper($hit);
+	    my $r = BoundaryFinder::score_hit(-hit => $hit,
+					      -db => $db,
+					      -cons_seq_5 => $cons3,
+					      -cons_seq_3 => $cons5
+		);
+
+
+
+#	    print Dumper($r);
+	    push @hit_list, $hit;
+	    push @bf_results, $r;
+	    push @idx_list, $hits[$i];
+	}
+	
+    } 
+    else {
+
+    }
+    
+    my $cons_seq_list = BFApp::get_files('public/consensus_seq');
+    
+    $self->render('boundary',
+		  results => \@bf_results, 
+		  hits => \@hit_list, 
+		  idx_list => \@idx_list,
+		  sequence => $sequence,
+		  cons_seq => $cons_seq_list
+	);
+};
+
+post '/boundaryresults' => sub {
+    my $self = shift;
+
+    my $out = "";
+
+    my @hit_3 = $self->param('hit_3') if defined $self->param('hit_3');
+    my @hit_5 = $self->param('hit_5') if defined $self->param('hit_5');
+
+    if (@hit_3 < 1 || @hit_5 < 1) {
+	$out = "Error: Must select at least one 5', and one 3' hit";
+	$self->render(text => $out);
+	return;
+    }
+
+
+    $out = "Results (Press back to select new boundaries and/or hits)</br><code>";
+    $out .= "5' Cons Seq Offset:" . $self->session('up_boundary') . "</br>";
+    $out .= "3' Cons Seq Offset: " . $self->session('down_boundary') . "</br>";
+    $out .= "</br></br>";
+
+    # User defined sequence
+    if ( defined $self->param('sequence') ) {
+	my $sequence = $self->param('sequence');
+
+	for my $up (@hit_5) {
+	    for my $down (@hit_3) {
+		if ( $up + $self->session('up_boundary') 
+		     < $down + $self->session('down_boundary') ) {
+
+		    my $title = '&gt;' . " $up | $down </br>";
+
+		    my $up_idx = $up + $self->session('up_boundary');
+		    my $seq = substr(
+			$sequence, 
+			$up_idx, 
+			$down + $self->session('down_boundary') - $up_idx + 1
+		    );
+
+		    $seq =~ s/(.{1,70})/$1<\/br>/gs;
+		    $out .= $title . $seq . "</br></br>" ;
+		}
+	    }
+	}
+    } 
+    # Sequences from a blast result
+    # We need: The db, the selected hit, the hit session object, and the
+    # hit indexes.
+    elsif ( defined $self->param('hit_id') && $self->session('hits') ) {
+
+	if ( not defined $self->session('db') ) {
+	    $out = "Database DNE. This is likely the programmers fault\n";
+	    $self->render(text => $out);
+	}
+
+	my $db = $self->session('db');
+	my $hit_id = $self->param('hit_id') if defined $self->param('hit_id');
+	my $bm = BlastManager->new(-blast_db => $db);
+	my $hits = $self->session('hits');
+
+	my $hit = $hits->[$hit_id];
+
+	for my $up (@hit_5) {
+	    for my $down (@hit_3) {
+		#print "THE PAIR: $up, $down\n";
+		if ( $up + $self->session('up_boundary') 
+		     < $down + $self->session('down_boundary') ) {
+		    		    
+		    my $title = '&gt;' . " $db | Hit: $hit_id | ";
+		    $title .= $up + $self->session('up_boundary') . " | ";
+		    $title .= $down + $self->session('down_boundary') . "</br>";
+		    my $seq = $bm->get_sequence(
+			-db => $db,
+			-seq_id => $hit->{sseqid},
+			-start => $up + $self->session('up_boundary'),
+			-end => $down + $self->session('down_boundary')
+			);
+		    $seq =~ s/(.{1,70})/$1<\/br>/gs;
+		    $out .= $title . $seq . "</br></br>" ;
+		}
+	    }
+	}
+	
+    }
+    else {
+	$out = "There is not enough info to get Boundary Results. ";
+	$out .= "Did you visit this page by accident?";
+    }
+
+    $self->render(text => "$out</code>");
+};
+
+get '/sequence_search' => sub { shift->render('/sequence_search'); };
+
+get '/sequence_results' => sub { shift->redirect_to('/sequence_search') };
+
+post '/sequence_results' => sub {
+    my $self = shift;
+    
+    my $query   = uc $self->param('query') if defined $self->param('query');
+    my $subject = uc $self->param('subject') if defined $self->param('subject');  
+    my $up = $self->param('up_padding') if defined $self->param('up_padding');
+    my $dn = $self->param('down_padding') if defined $self->param('down_padding');
+    
+    if ($query eq "" || $subject eq "" || $up eq "" || $dn eq "") {
+	$self->render(text => "Missing required fields");
+	return;
+    }
+
+    $subject =~ s/\n|\r//g;
+
+    my $l = length ($query);
+    
+    my @matches;
+    $query =~ s/X/./g;
+    $query = '^' . $query;
+
+    for (my $i = 0; $i < length($subject) - ($l * 3 - 1); $i++) {
+	my $slice = substr ($subject, $i, ($l * 3) );
+	$slice = BFApp::to_aa($slice);
+
+	print "Does '$slice' match '$query'...";
+
+	if ($slice =~ m/$query/) {
+	    push @matches, $i;
+	    print "YES\n";
+	} 
+	else {
+	    print "NO\n";
+	}
+    }
+
+    my $out = "Found " .  length(@matches) . " results! \n";
+
+    my $i = 1;    
+    for my $idx (@matches) {
+
+	$out .= '> Match No: ' . $i++. " at index: $idx\n";
+
+	my $up_idx = $idx - $up;
+	$up_idx = 0 if $up_idx < 0;
+	
+	my $seq_len = $idx + $dn - $up_idx;
+
+	$seq_len = length($subject) - $up_idx
+	    if $up_idx + $seq_len > length($subject);
+
+
+	my $seq = substr $subject, $up_idx, $seq_len;
+	
+
+	#~ Now add the Translated in frame sequence
+	my $f = ($idx - $up_idx) % 3; # Get the frame
+	my $acids = BFApp::to_aa( substr($seq, $f) );
+
+	# Format the NT
+	$seq =~ s/(.{1,70})/$1\n/gs;
+	$out .= $seq . "\n";
+
+	# Format the AA
+	$acids =~ s/(.{1,70})/$1\n/gs;
+	$out .= $acids . "\n";
+    }
+
+    $self->render('/sequence_results', 
+		  output => $out);
+};
+
+app->start;
+
+__DATA__
+
+@@ index.html.ep
+% layout 'default';
+% title 'Boundary Finder';
+
+<h2>Synopsis</h2>
+
+<article>
+<h3>Running Blasts</h3>
+
+<section>
+<p>The blast tool is can be used to run blast queries and acquire hits for the boundary finder. </p>
+
+<ol>
+
+<li>
+<p> To start, select a blast program. For the moment the only supported program is tblastn. If it would be useful, other programs can be implemented in a future update if desired. (To do so, mail me at nate@elmoren.com)</p>
+</li>
+
+<li>
+<p>The next step is to select a blast database. A blast database for the babo. region of drosophila Melanogaster is already installed. Instructions for adding your own databases can be found below.</p>
+</li>
+
+<li>
+<p>Select a query sequence from the queries list. Drosophila Babo. with A receptor is already intalled. You can add your own queries by following the instructions below.</p>
+</li>
+
+<li>
+<p>You can change the expect value to broaden or narrow you search. When you are ready, click <b>Run Blast</b> to perform your query!</p>
+</li>
+
+</ol>
+</section>
+
+<section>
+<h4>Adding Custom Blast Databases</h4>
+
+<p>To add a custom database you will need to first get a fasta file with the nucleotide sequence. Multiple sequences in a fasta file are not yet supported.</p>
+
+<p>The header line for the sequence is required becasue this program uses it to find the correct database! The start of an example fasta file, dmel.fas, might look like:</p>
+
+<div class="code">
+<code>&gt;2R:4840277-4848161 Drosophila Melanogaster
+gccgctcctcctgctcctgcggccccgcctcgtcctgccgcgaaacaacaatctcatttg
+caggccacagactttgaacttgcgacgcgcgtgtgcgtgcgtgcgatcgtggaaaacaaa
+agaaaagctctcgggctgcacaaacaataacaatagctcgggtcgggtcgcacacactat
+cgtcggtgcgaatagccaacatgttatctgcgctccggctaatcttcctgggcgctctgc
+tcggcgcctctgtttgcggtgagtgtaccccccagcggttccattaatctggatcaggtg</code>
+</div>
+
+<p>Save this file, and name it something descriptive, such as dmel_punt.fas, dvir_babo.fas, etc</p>
+
+<p>Now open up the finder and navigate to the Web App Folder. Put this file in the "public/blastdb" folder.</p>
+
+<p>Now for the tricky part. Open up a terminal. The "terminal" program is located under Applications -> Utilities -> Terminal.</p>
+
+<p>Type:</p>
+
+<div class="code">
+<code>cd WebApp/public/blastdb</code>
+</div>
+
+<p>Then Type:</p>
+
+<div class="code">
+<code>ls</code>
+</div>
+
+<p><b>ls</b> Lists the files in the directory. Verify that the fasta file you created is in the list</p>
+
+%= image '/img/ls_before.png'
+
+<p>The last step is to create the database. In the following command, replace the &lt;name&gt; with the name of the file. See the examble below.</p>
+
+<div class="code">
+<code>makeblastdb -in &lt;name&gt;.fas -out &lt;name&gt; -dbtype nucl -parse_seqids
+</code>
+</div>
+
+<p>For Example:</p>
+<div class="code">
+<code>makeblastdb -in dmel.fas -out dmel -dbtype nucl -parse_seqids
+</code>
+</div>
+
+<p>If you do an ls after this command, you can see the files it created:</p>
+
+%= image '/img/ls_after.png'
+
+<p>SUCESS! You can now see the database in the blast page!</p>
+
+</section>
+
+<section>
+
+%=t h4 => 'Adding a query'
+
+<p>Adding your own queries is as simple as moving a Amino Acid fasta file into a directory. Given an amino acid fasta file...DMel_prot_a.faa: </p>
+
+<div class="code">
+<code>&gt; DMel_Babo_A|Protein
+MLSALRLIFLGALLGASVCASPIEFVMDTSLNGSRSDPATATHPGKWPPT
+TKAPALRAPAGTAGHAYQSPSSSLAADNRSHDNNNASAVSMLLPQDGDAS
+GAVAPAVTPQLPIYIAQPSAKKPENKIKCHCDTCKESNNICETDGFCFTS
+VEKNSDGSIIFSYSCMVVKYNMQRSKPFECLTSNERFDTYRIDCCKSDFC
+NKNEIMKRIFETDYVPHRLTSWEFVAIILGATLFICFTGTSTWYYCQRRK
+RMASGRTFAKEDSAYDPILNGNTTIHDIIEMTTSGSGSAGLPLLVQRSIA
+RQVQLCHVIGKGRFGEVWRGRWRGENVAVKIFSSREECSWFREAEIYQTV
+MLRHENILGFIAADNKDNGTWTQLWLVTDYHENGSLFDYLTTHPVDTNTM
+LNMSLSIATGLAHLHMDIVGTRGKPAIAHRDLKSKNILVKSNLSCAIGDL
+GLAVRHVEKNDSVDIPSTHRVGTKRYMAPEVLDESMNDQHFDSYKRADVY
+AFGLILWEIARRCNMGMIYDEYQLPYYDVVQPDPSIEEMKKVVCIEKCRP
+NIPNRWHASDVLHNMAKVMKECWYPNPVARLTALRIKKTLASISVEDKVK
+N
+</code>
+</div>
+
+<p>Save this file in the WebApp/public/blast_query/ directory. Make sure to name it soemthing descriptive.</p>
+
+</section>
+
+</article>
+
+@@ blast.html.ep
+%layout 'default';
+%title 'Blast Tool';
+
+<h2>Blast Tools</h2>
+
+<%= form_for '/blastresults' => (method => 'post') => begin %>
+Program: <%= select_field 'blast' => ['tblastn'], id => 'blast_type' %> </br>
+Database: <%= select_field 'db' => $dblist, id => 'blastdb' %> </br>
+Query: <%= select_field 'query' => $qlist, id => 'blastdb' %> </br>
+E-Value:  <%= text_field 'evalue' => '10.0' %> </br>
+
+%= submit_button 'Run Blast' 
+%= end
+
+@@ blastresults.html.ep
+%layout 'default';
+%title 'Blast Tool';
+
+<h2>Blast results</h2>
+    
+%= t h3 => "Params"
+    
+%= t table => begin
+    
+    %= tag tr => begin 
+      %= t td => "Program:"
+      %= t td => $blast
+    % end
+
+    %= tag tr => begin 
+      %= t td => "Database:"
+      %= t td => $db
+    % end
+    
+    %= tag tr => begin 
+      %= t td => "Query:"
+      %= t td => $query
+    % end
+
+    %= tag tr => begin 
+      %= t td => "E Value:"
+      %= t td => $evalue
+    %= end
+
+% end 
+    
+%= t h3 => "Blast Hit Selection"
+
+% my @cols = sort keys %{$results->get(-idx => 0)};
+%= form_for '/boundaryfinder' => (method => 'post') => begin
+
+%= t table => begin
+
+%= t tr => begin
+%= t th => "Check"
+
+
+% for my $col ( @cols ) {
+%= t th => $col
+% }
+
+%end
+
+
+% for (my $i = 0; $i < $results->size; $i++) {
+%= t tr => begin
+%   my $hit = $results->get(-idx => $i);
+<td>
+%= check_box hit => $i
+</td>
+%   for my $key ( @cols ) {
+%=    t td => $hit->{$key};
+%   }
+% end
+% }
+
+%end
+</br>
+Consensus Seq: <%= select_field 'cons_seq' => $cons_seq, id => 'cons_seq' %> 
+</br>
+%= submit_button 'Run Boundary Finder' 
+%end
+
+%= t h3 => "Blast Output"
+
+<div class="code">
+<code>
+%= $raw
+</code>
+</div>
+
+@@ boundary.html.ep
+%layout 'default';
+%title 'BoundaryFinder';
+
+% if ( @{$hits} > 0) {
+
+  <p>For each hit, select upstream and downstream checkboxes to get sequences. Then, press "Submit" to view the resultant sequences.</p>
+
+% my $i = 0;
+% for my $hit ( @{$hits} ) {
+
+    <h2>Hit <%= $i+1 %></h2>
+    %= t table => begin
+
+      % for my $k ( keys %{$hit} ) {
+         %= t tr => begin
+         <td> <%= $k %> </td>
+         <td> <%= $hit->{$k} %> </td>
+         % end
+       % }
+
+      % end
+
+%  my $r = $results->[$i];
+
+%=      form_for '/boundaryresults' => (method => 'post') => begin 
+%       for my $k (keys %{$r}) {
+%         my $checkbox_name;
+%         if ($k =~ m/\-3\-/) {
+            <h3>5' of the exon</h3>
+%           $checkbox_name = "hit_5";
+%         } else {
+            <h3>3' of the exon</h3>
+%           $checkbox_name = "hit_3";
+%         }
+   
+           %= t table => begin
+           <tr><th></th><th>Index</th><th>score</th></tr>
+%          for my $idx ( sort keys %{ $r->{$k} } ) {
+             %= t tr => begin
+             <td>
+               %= check_box $checkbox_name => $idx
+             </td>
+             <td> <%= $idx %> </td>
+             <td> <%= $r->{$k}->{$idx} %> </td>
+             % end
+%          }
+      % end
+%       }
+%= hidden_field 'hit_id' => $idx_list->[$i]
+        </br>
+        %= submit_button 'Submit' 
+        % end
+
+        % $i++;
+%     }
+
+% }
+% elsif ($sequence ne "") {
+%  my $r = shift @{$results};
+%= form_for '/boundaryresults' => (method => 'post') => begin 
+%   for my $k (keys %{$r}) {
+%     my $checkbox_name;
+%     if ($k =~ m/\-3\-/) {
+       <h3>5' of the exon</h3>
+%      $checkbox_name = "hit_5";
+%     } else {
+       <h3>3' of the exon</h3>
+%      $checkbox_name = "hit_3";
+%     }
+      %= t table => begin
+      <tr><th></th><th>Index</th><th>score</th></tr>
+%     for my $idx ( sort {$a <=>$b } keys %{ $r->{$k} } ) {
+         %= t tr => begin
+         <td>
+            %= check_box $checkbox_name => $idx
+         </td>
+         <td> <%= $idx %> </td>
+         <td> <%= $r->{$k}->{$idx} %> </td>
+         % end
+%     }
+
+      % end
+
+%     }
+
+%= hidden_field 'sequence' => $sequence
+</br>
+%= submit_button 'Submit' 
+% end
+
+% }
+% else {
+    %= form_for '/boundaryfinder' => (method => 'post') => begin
+    Consensus Seq: <%= select_field 'cons_seq' => $cons_seq, id => 'cons_seq' %>
+    </br>
+    Subject Sequence: (Do not include fasta header line) </br>
+    %= text_area 'sequence', cols => 100, rows => 10
+    </br>
+    %= submit_button 'Run Boundary Finder' 
+    % end
+% }
+
+@@ sequence_search.html.ep
+% layout 'default';
+% title 'Sequence Search';
+
+<p>Search for short sequences and extract sequences from the surrounding area. If the sequence is large enough to use blast, then blast is the better option. It will look at all three frames, but it will not perform the search on the reverse compliment... yet. This may take a long time if the query is too simple or if the subject is huge.</p>
+
+%= form_for '/sequence_results' => (method => 'post') => begin
+
+Query Sequence (Amino Acids, "X" is a wild card): </br>
+%= text_field 'query', size => 40
+</br> 
+
+<p>The padding is the number of nucleotides you want to capture on the 5' and the 3' of each search match</p>
+
+5' Padding: <%= text_field 'up_padding' %> </br>
+3' Padding: <%= text_field 'down_padding' %> </br>
+
+Subject sequence (NT): </br>
+%= text_area 'subject', cols => 100, rows => 10
+</br>
+%= submit_button 'Search' 
+
+% end
+
+@@ sequence_results.html.ep
+%layout 'default';
+%title 'Sequence Results';
+
+<h3>Simple Search Results</h3>
+
+<p>The results and the translated codons are below. An <em>X</em> shows where and <em>N</em> was found in the subject and could not be translated to an amino acid.</p>
+
+<div class="code">
+<code>
+%= $output
+</code>
+</div>
+
+@@ layouts/default.html.ep
+<!DOCTYPE html>
+<html>
+  <head><title><%= title %></title>
+    <style type="text/css">
+    code { white-space: pre; }
+    </style>
+    <link rel="stylesheet" type="text/css" href="style/layout.css">
+  </head>
+  <body>
+    <h1>Exon Boundary Finder</h1>
+    <nav>
+    <a href="/">Home</a>
+    <a href="/blast">Blast</a>
+    <a href="/boundaryfinder">Boundary Finder</a>
+    <a href="/sequence_search">Sequence Search</a>
+    </nav>
+    <%= content %>
+  </body>
+</html>

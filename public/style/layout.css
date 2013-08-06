@@ -1,0 +1,35 @@
+* {
+    font-family: "Lucida Sans Unicode", "Lucida Grande", sans-serif;
+    margin: 0.25em;
+    line-height: 110%;
+}
+
+p {
+    font-size: 14px;    
+    margin: 1em;
+}
+
+textarea {
+    font-size: 12px;
+    font-family: "Lucida Console", Monaco, monospace;
+}
+
+.code {
+    padding: 1em 1em 1em 3em;
+    font-size: 12px;
+    background-color: #E6E6E6;
+}
+
+code {
+    font-family: "Lucida Console", Monaco, monospace;
+}
+
+table {
+    font-size: 12px;
+    border-collapse: collapse;
+}
+
+table, td, tr, th {
+    border: 1px solid black;
+    padding: 0.5em;
+}
