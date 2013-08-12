@@ -357,7 +357,7 @@ post '/sequence_results' => sub {
 	$out .= $acids . "\n";
     }
 
-    $self->render('/sequence_results', 
+    $self->render('sequence_results', 
 		  output => $out);
 };
 
