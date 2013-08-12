@@ -285,7 +285,7 @@ post '/boundaryresults' => sub {
     $self->render(text => "$out</code>");
 };
 
-get '/sequence_search' => sub { shift->render('/sequence_search'); };
+get '/sequence_search' => sub { shift->render('sequence_search'); };
 
 get '/sequence_results' => sub { shift->redirect_to('/sequence_search') };
 
